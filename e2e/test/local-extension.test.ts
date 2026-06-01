@@ -108,6 +108,7 @@ test("live Pi session command path runs through async UI state and survives sele
       mode: "native-live",
       maxResults: 20,
       refreshMs: 5000,
+      includeFolders: true,
     }),
   });
   const agentDir = await mkdtemp(path.join(tmpdir(), "pi-television-live-"));

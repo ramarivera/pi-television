@@ -33,12 +33,14 @@ export type TelevisionConfig = {
   mode?: TelevisionMode;
   maxResults?: number;
   refreshMs?: number;
+  includeFolders?: boolean;
 };
 
 export type TelevisionResolvedConfig = {
   mode: TelevisionMode;
   maxResults: number;
   refreshMs: number;
+  includeFolders: boolean;
 };
 
 export type TelevisionSearchResult = {
@@ -53,6 +55,7 @@ export type TelevisionSearchOptions = {
   signal?: AbortSignal;
   maxResults?: number;
   refreshMs?: number;
+  includeFolders?: boolean;
 };
 
 export type TelevisionSearcher = (
@@ -82,10 +85,13 @@ export const extensionInfo: ExtensionInfo = {
     "Pi extension that powers native @file picking with background television-style search",
 };
 
+const DEFAULT_INCLUDE_FOLDERS = true;
+
 const defaultResolvedConfig: TelevisionResolvedConfig = {
   mode: "native-live",
   maxResults: DEFAULT_MAX_RESULTS,
   refreshMs: DEFAULT_REFRESH_MS,
+  includeFolders: DEFAULT_INCLUDE_FOLDERS,
 };
 
 type FileIndexCache = {
@@ -134,6 +140,8 @@ function normalizeTelevisionConfig(
     mode: config?.mode ?? defaultResolvedConfig.mode,
     maxResults: config?.maxResults ?? defaultResolvedConfig.maxResults,
     refreshMs: config?.refreshMs ?? defaultResolvedConfig.refreshMs,
+    includeFolders:
+      config?.includeFolders ?? defaultResolvedConfig.includeFolders,
   };
 }
 
@@ -212,6 +220,7 @@ export function createDefaultSearcher(pi: ExtensionAPI): TelevisionSearcher {
     signal,
     maxResults = DEFAULT_MAX_RESULTS,
     refreshMs = DEFAULT_REFRESH_MS,
+    includeFolders = DEFAULT_INCLUDE_FOLDERS,
   }) => {
     const now = Date.now();
     const cached = cache.get(cwd);
@@ -225,10 +234,9 @@ export function createDefaultSearcher(pi: ExtensionAPI): TelevisionSearcher {
       return rankTelevisionResults(entries, query, maxResults);
     }
 
-    const pending = (async () => {
-      const result = await pi.exec(
-        "fd",
-        [
+    const fdArgs = includeFolders
+      ? ["--hidden", "--follow", "--exclude", ".git", "--strip-cwd-prefix"]
+      : [
           "--type",
           "f",
           "--hidden",
@@ -236,13 +244,14 @@ export function createDefaultSearcher(pi: ExtensionAPI): TelevisionSearcher {
           "--exclude",
           ".git",
           "--strip-cwd-prefix",
-        ],
-        {
-          cwd,
-          signal,
-          timeout: 10_000,
-        },
-      );
+        ];
+
+    const pending = (async () => {
+      const result = await pi.exec("fd", fdArgs, {
+        cwd,
+        signal,
+        timeout: 10_000,
+      });
 
       if (result.code !== 0) {
         const details = result.stderr.trim() || `exit code ${result.code}`;
@@ -288,6 +297,7 @@ export function createTelevisionAutocompleteProvider(
         signal: options.signal,
         maxResults: config.maxResults,
         refreshMs: config.refreshMs,
+        includeFolders: config.includeFolders,
       });
 
       if (options.signal.aborted || results.length === 0) {
@@ -363,6 +373,7 @@ async function findFiles(
       signal: ctx.signal,
       maxResults: config.maxResults,
       refreshMs: config.refreshMs,
+      includeFolders: config.includeFolders,
     });
   } finally {
     ctx.ui.setStatus(STATUS_KEY, undefined);

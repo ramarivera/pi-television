@@ -47,10 +47,13 @@ Supported fields:
 ```json
 {
   "mode": "native-live",
+  "includeFolders": true,
   "maxResults": 20,
   "refreshMs": 10000
 }
 ```
+
+`includeFolders` defaults to `true`, so folder paths are returned alongside files. Set it to `false` to restrict the picker to regular files only.
 
 ## Local Development
 

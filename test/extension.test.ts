@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import type {
   ExtensionAPI,
@@ -11,8 +14,10 @@ import type {
   AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
 import {
+  createDefaultSearcher,
   createExtension,
   extensionInfo,
+  loadTelevisionConfig,
   type TelevisionSearcher,
   type TelevisionSearchResult,
   toEditorAttachmentPath,
@@ -244,6 +249,7 @@ test("native-live mode registers an autocomplete provider that returns @file sug
       mode: "native-live",
       maxResults: 20,
       refreshMs: 5000,
+      includeFolders: true,
     }),
   }).register(fake.pi);
 
@@ -284,6 +290,7 @@ test("autocomplete provider falls back to the current provider outside @file tok
       mode: "native-live",
       maxResults: 20,
       refreshMs: 5000,
+      includeFolders: true,
     }),
   }).register(fake.pi);
 
@@ -317,6 +324,7 @@ test("/television uses the native select dialog and pastes the selected file", a
       mode: "native-live",
       maxResults: 20,
       refreshMs: 5000,
+      includeFolders: true,
     }),
   }).register(fake.pi);
 
@@ -352,6 +360,7 @@ test("select-dialog mode binds @ to the native select dialog instead of launchin
       mode: "select-dialog",
       maxResults: 20,
       refreshMs: 5000,
+      includeFolders: true,
     }),
   }).register(fake.pi);
 
@@ -387,4 +396,118 @@ test("attachment paths are relative, quoted when needed, and safe for paths outs
     toEditorAttachmentPath("/tmp/other/file.md", "/tmp/project"),
     "@/tmp/other/file.md ",
   );
+});
+
+type FakeExecCall = {
+  command: string;
+  args: string[];
+  options: { cwd: string; timeout?: number; signal?: AbortSignal };
+};
+
+type FakeExecPi = ExtensionAPI & {
+  execCalls: FakeExecCall[];
+  execOutput: { code: number; stdout: string; stderr: string };
+};
+
+function fakeExecPi(stdout: string): FakeExecPi {
+  const calls: FakeExecCall[] = [];
+  const pi = {
+    registerCommand() {},
+    on() {},
+    async exec(
+      command: string,
+      args: string[],
+      options: { cwd: string; timeout?: number; signal?: AbortSignal },
+    ) {
+      calls.push({ command, args, options });
+      return { code: 0, stdout, stderr: "" };
+    },
+  };
+  return Object.assign(pi, {
+    execCalls: calls,
+    execOutput: { code: 0, stdout, stderr: "" },
+  }) as unknown as FakeExecPi;
+}
+
+test("default searcher includes folders by default (no --type f passed to fd)", async () => {
+  const pi = fakeExecPi("src\nsrc/index.ts\n");
+  const searcher = createDefaultSearcher(pi);
+  const results = await searcher({ cwd: "/tmp/project", query: "src" });
+
+  assert.equal(pi.execCalls.length, 1);
+  assert.deepEqual(pi.execCalls[0].command, "fd");
+  assert.deepEqual(pi.execCalls[0].args, [
+    "--hidden",
+    "--follow",
+    "--exclude",
+    ".git",
+    "--strip-cwd-prefix",
+  ]);
+  assert.equal(pi.execCalls[0].options.cwd, "/tmp/project");
+  assert.deepEqual(
+    results.map((result) => result.path),
+    ["src", "src/index.ts"],
+  );
+});
+
+test("default searcher restricts to files when includeFolders is false", async () => {
+  const pi = fakeExecPi("src/index.ts\n");
+  const searcher = createDefaultSearcher(pi);
+  await searcher({ cwd: "/tmp/project", includeFolders: false });
+
+  assert.equal(pi.execCalls.length, 1);
+  assert.deepEqual(pi.execCalls[0].args, [
+    "--type",
+    "f",
+    "--hidden",
+    "--follow",
+    "--exclude",
+    ".git",
+    "--strip-cwd-prefix",
+  ]);
+});
+
+test("loadTelevisionConfig defaults includeFolders to true when no config files exist", async () => {
+  const fakeHome = await mkdtemp(path.join(tmpdir(), "pi-television-homedir-"));
+  const originalHomedir = process.env.HOME;
+  process.env.HOME = fakeHome;
+  try {
+    const resolved = await loadTelevisionConfig("/tmp/project");
+    assert.equal(resolved.includeFolders, true);
+  } finally {
+    if (originalHomedir === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHomedir;
+    }
+    await rm(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test("native-live provider forwards the resolved includeFolders to the searcher", async () => {
+  let observedIncludeFolders: boolean | undefined;
+  const searcher: TelevisionSearcher = async (options) => {
+    observedIncludeFolders = options.includeFolders;
+    return matches("src");
+  };
+  const fake = fakePi();
+  const ctx = fakeContext("/tmp/project");
+  createExtension({
+    searcher,
+    configLoader: async () => ({
+      mode: "native-live",
+      maxResults: 20,
+      refreshMs: 5000,
+      includeFolders: true,
+    }),
+  }).register(fake.pi);
+
+  await fake.sessionStart?.(ctx);
+
+  const provider = ctx.buildAutocomplete(createFallbackProvider(null));
+  await provider?.getSuggestions(["@src"], 0, 4, {
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(observedIncludeFolders, true);
 });
