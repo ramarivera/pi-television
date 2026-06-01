@@ -12,8 +12,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   createExtension,
-  type TelevisionPickResult,
-  type TelevisionRunner,
+  type TelevisionSearcher,
+  type TelevisionSearchResult,
 } from "../../src/index.ts";
 
 const repoRoot = process.cwd();
@@ -30,6 +30,10 @@ async function makeAgentDir(): Promise<string> {
     }),
   );
   return agentDir;
+}
+
+function matches(...paths: string[]): TelevisionSearchResult[] {
+  return paths.map((path) => ({ path }));
 }
 
 test("Pi SDK discovers the project-local .pi television extension without loader errors", async () => {
@@ -91,17 +95,21 @@ test("live Pi session binds the local .pi extension and exposes /television", as
 });
 
 test("live Pi session command path runs through async UI state and survives selecting a file", async () => {
-  const selected: TelevisionPickResult = {
-    status: "selected",
-    path: "src/index.ts",
-  };
-  const runner: TelevisionRunner = async ({ cwd, query }) => {
+  const searcher: TelevisionSearcher = async ({ cwd, query, maxResults }) => {
     assert.equal(cwd, repoRoot);
     assert.equal(query, "src");
+    assert.equal(maxResults, 20);
     await new Promise((resolve) => setTimeout(resolve, 5));
-    return selected;
+    return matches("src/index.ts", "src/extension.ts");
   };
-  const extension = createExtension({ runner });
+  const extension = createExtension({
+    searcher,
+    configLoader: async () => ({
+      mode: "native-live",
+      maxResults: 20,
+      refreshMs: 5000,
+    }),
+  });
   const agentDir = await mkdtemp(path.join(tmpdir(), "pi-television-live-"));
   const loader = new DefaultResourceLoader({
     cwd: repoRoot,
@@ -127,10 +135,21 @@ test("live Pi session command path runs through async UI state and survives sele
     const pasted: string[] = [];
     const statuses: Array<string | undefined> = [];
     const workingMessages: Array<string | undefined> = [];
+    const selectCalls: Array<{ title: string; options: string[] }> = [];
 
     try {
       await session.bindExtensions({
         uiContext: {
+          async select(title: string, options: string[]) {
+            selectCalls.push({ title, options });
+            return "src/extension.ts";
+          },
+          async confirm() {
+            return false;
+          },
+          async input() {
+            return undefined;
+          },
           notify() {},
           pasteToEditor(text: string) {
             pasted.push(text);
@@ -159,10 +178,16 @@ test("live Pi session command path runs through async UI state and survives sele
         session.createReplacedSessionContext() as ExtensionCommandContext,
       );
 
-      assert.deepEqual(pasted, ["@src/index.ts "]);
-      assert.deepEqual(statuses, ["television: picking file", undefined]);
+      assert.deepEqual(selectCalls, [
+        {
+          title: "television",
+          options: ["src/index.ts", "src/extension.ts"],
+        },
+      ]);
+      assert.deepEqual(pasted, ["@src/extension.ts "]);
+      assert.deepEqual(statuses, ["television: finding files", undefined]);
       assert.deepEqual(workingMessages, [
-        "television is picking a file",
+        "television is finding files",
         undefined,
       ]);
     } finally {

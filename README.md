@@ -1,11 +1,55 @@
 # @ramarivera/pi-television
 
-Pi extension that replaces the fuzzy file finder with television (tv) for faster, non-blocking file search
+Pi extension that keeps Pi's native file picking UX while replacing the default `@file` search path with a faster background television-style search.
 
 ## Install
 
 ```sh
-pi install npm:@ramarivera/pi-television@0.0.1
+pi install npm:@ramarivera/pi-television@0.0.4
+```
+
+## Modes
+
+### Default: native live picker
+
+By default, typing `@` in Pi keeps using Pi's native picker UI, but the suggestions come from this extension's background file search instead of launching the full-screen `tv` interface.
+
+### Optional: select dialog mode
+
+If you want the simpler fallback flow, create `.pi/television.json` in your project:
+
+```json
+{
+  "mode": "select-dialog"
+}
+```
+
+That mode uses background search plus a native Pi select dialog when you trigger `@`.
+
+## Config
+
+Project config lives at:
+
+```text
+.pi/television.json
+```
+
+You can also set a user-level default at:
+
+```text
+~/.pi/agent/television.json
+```
+
+Project config overrides user config.
+
+Supported fields:
+
+```json
+{
+  "mode": "native-live",
+  "maxResults": 20,
+  "refreshMs": 10000
+}
 ```
 
 ## Local Development
@@ -37,4 +81,3 @@ Before the first publish, configure npm trusted publishing:
 - environment: blank unless the workflow is changed to require one
 
 No `NPM_TOKEN` is required for trusted publishing.
-

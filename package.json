@@ -1,7 +1,7 @@
 {
   "name": "@ramarivera/pi-television",
-  "version": "0.0.3",
-  "description": "Pi extension that replaces the fuzzy file finder with television (tv) for faster, non-blocking file search",
+  "version": "0.0.4",
+  "description": "Pi extension that powers native Pi @file picking with background television-style search",
   "type": "module",
   "license": "MIT",
   "author": "Ramiro Rivera",

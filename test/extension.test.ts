@@ -6,11 +6,15 @@ import type {
   ExtensionContext,
   TerminalInputHandler,
 } from "@earendil-works/pi-coding-agent";
+import type {
+  AutocompleteProvider,
+  AutocompleteSuggestions,
+} from "@earendil-works/pi-tui";
 import {
   createExtension,
   extensionInfo,
-  type TelevisionPickResult,
-  type TelevisionRunner,
+  type TelevisionSearcher,
+  type TelevisionSearchResult,
   toEditorAttachmentPath,
 } from "../src/index.ts";
 
@@ -22,7 +26,7 @@ type RegisteredCommand = {
 type FakePi = {
   pi: ExtensionAPI;
   commands: Map<string, RegisteredCommand>;
-  sessionStart?: (ctx: ExtensionContext) => void;
+  sessionStart?: (ctx: ExtensionContext) => Promise<void>;
 };
 
 type FakeContext = ExtensionContext & {
@@ -33,7 +37,13 @@ type FakeContext = ExtensionContext & {
   }>;
   statuses: Array<string | undefined>;
   workingMessages: Array<string | undefined>;
+  selectCalls: Array<{ title: string; options: string[] }>;
+  nextSelectResult?: string;
+  autocompleteFactory?: (current: AutocompleteProvider) => AutocompleteProvider;
   invokeTerminal(data: string): ReturnType<TerminalInputHandler>;
+  buildAutocomplete(
+    current: AutocompleteProvider,
+  ): AutocompleteProvider | undefined;
 };
 
 function fakePi(): FakePi {
@@ -45,10 +55,12 @@ function fakePi(): FakePi {
     },
     on(
       event: string,
-      handler: (_event: unknown, ctx: ExtensionContext) => void,
+      handler: (_event: unknown, ctx: ExtensionContext) => void | Promise<void>,
     ) {
       if (event === "session_start") {
-        fake.sessionStart = (ctx: ExtensionContext) => handler({}, ctx);
+        fake.sessionStart = async (ctx: ExtensionContext) => {
+          await handler({}, ctx);
+        };
       }
     },
   } as ExtensionAPI;
@@ -62,6 +74,7 @@ function fakeContext(cwd = process.cwd()): FakeContext {
   const notifications: FakeContext["notifications"] = [];
   const statuses: Array<string | undefined> = [];
   const workingMessages: Array<string | undefined> = [];
+  const selectCalls: Array<{ title: string; options: string[] }> = [];
   const context = {
     cwd,
     hasUI: true,
@@ -70,7 +83,22 @@ function fakeContext(cwd = process.cwd()): FakeContext {
     notifications,
     statuses,
     workingMessages,
+    selectCalls,
+    nextSelectResult: undefined as string | undefined,
+    autocompleteFactory: undefined as
+      | ((current: AutocompleteProvider) => AutocompleteProvider)
+      | undefined,
     ui: {
+      async select(title: string, options: string[]) {
+        selectCalls.push({ title, options });
+        return context.nextSelectResult;
+      },
+      async confirm() {
+        return false;
+      },
+      async input() {
+        return undefined;
+      },
       notify(message: string, type?: "info" | "warning" | "error") {
         notifications.push(type ? { message, type } : { message });
       },
@@ -90,10 +118,61 @@ function fakeContext(cwd = process.cwd()): FakeContext {
         workingMessages.push(message);
       },
       setWorkingIndicator() {},
+      setWorkingVisible() {},
+      setHiddenThinkingLabel() {},
+      setWidget() {},
+      setFooter() {},
+      setHeader() {},
+      setTitle() {},
+      async custom() {
+        throw new Error("custom UI not implemented in fake context");
+      },
+      setEditorText() {},
       getEditorText() {
         return "";
       },
-      setEditorText() {},
+      async editor() {
+        return undefined;
+      },
+      addAutocompleteProvider(
+        factory: (current: AutocompleteProvider) => AutocompleteProvider,
+      ) {
+        context.autocompleteFactory = factory;
+      },
+      setEditorComponent() {},
+      getEditorComponent() {
+        return undefined;
+      },
+      theme: {
+        fg(_color: string, text: string) {
+          return text;
+        },
+        bg(_color: string, text: string) {
+          return text;
+        },
+        bold(text: string) {
+          return text;
+        },
+        italic(text: string) {
+          return text;
+        },
+        strikethrough(text: string) {
+          return text;
+        },
+      },
+      getAllThemes() {
+        return [];
+      },
+      getTheme() {
+        return undefined;
+      },
+      setTheme() {
+        return { success: true };
+      },
+      getToolsExpanded() {
+        return false;
+      },
+      setToolsExpanded() {},
     },
     isIdle() {
       return true;
@@ -103,11 +182,41 @@ function fakeContext(cwd = process.cwd()): FakeContext {
       return false;
     },
     shutdown() {},
+    getContextUsage() {
+      return undefined;
+    },
+    compact() {},
+    getSystemPrompt() {
+      return "";
+    },
     invokeTerminal(data: string) {
       return terminalHandler?.(data);
     },
+    buildAutocomplete(current: AutocompleteProvider) {
+      return context.autocompleteFactory?.(current);
+    },
   };
   return context as unknown as FakeContext;
+}
+
+function createFallbackProvider(
+  result: AutocompleteSuggestions | null,
+): AutocompleteProvider {
+  return {
+    async getSuggestions() {
+      return result;
+    },
+    applyCompletion(lines, cursorLine, cursorCol) {
+      return { lines, cursorLine, cursorCol };
+    },
+    shouldTriggerFileCompletion() {
+      return true;
+    },
+  };
+}
+
+function matches(...paths: string[]): TelevisionSearchResult[] {
+  return paths.map((path) => ({ path }));
 }
 
 test("factory registers the command and exposes extension identity", () => {
@@ -120,102 +229,149 @@ test("factory registers the command and exposes extension identity", () => {
   assert.ok(fake.sessionStart);
 });
 
-test("command pastes the selected file as a Pi @file attachment", async () => {
-  const runner: TelevisionRunner = async ({ cwd, query }) => {
+test("native-live mode registers an autocomplete provider that returns @file suggestions", async () => {
+  const searcher: TelevisionSearcher = async ({ cwd, query, maxResults }) => {
     assert.equal(cwd, "/tmp/project");
     assert.equal(query, "src");
-    return { status: "selected", path: "src/index.ts" };
+    assert.equal(maxResults, 20);
+    return matches("src/index.ts", "src/extension.ts");
   };
   const fake = fakePi();
   const ctx = fakeContext("/tmp/project");
-  createExtension({ runner }).register(fake.pi);
+  createExtension({
+    searcher,
+    configLoader: async () => ({
+      mode: "native-live",
+      maxResults: 20,
+      refreshMs: 5000,
+    }),
+  }).register(fake.pi);
+
+  await fake.sessionStart?.(ctx);
+
+  const provider = ctx.buildAutocomplete(createFallbackProvider(null));
+  assert.ok(provider, "expected autocomplete provider to be registered");
+
+  const suggestions = await provider?.getSuggestions(["@src"], 0, 4, {
+    signal: new AbortController().signal,
+  });
+
+  assert.deepEqual(suggestions, {
+    prefix: "@src",
+    items: [
+      {
+        value: "@src/index.ts",
+        label: "src/index.ts",
+        description: "src/index.ts",
+      },
+      {
+        value: "@src/extension.ts",
+        label: "src/extension.ts",
+        description: "src/extension.ts",
+      },
+    ],
+  });
+});
+
+test("autocomplete provider falls back to the current provider outside @file tokens", async () => {
+  const fake = fakePi();
+  const ctx = fakeContext();
+  createExtension({
+    searcher: async () => {
+      throw new Error("searcher should not be called");
+    },
+    configLoader: async () => ({
+      mode: "native-live",
+      maxResults: 20,
+      refreshMs: 5000,
+    }),
+  }).register(fake.pi);
+
+  await fake.sessionStart?.(ctx);
+
+  const fallback = {
+    prefix: "#12",
+    items: [{ value: "#123", label: "#123" }],
+  } satisfies AutocompleteSuggestions;
+  const provider = ctx.buildAutocomplete(createFallbackProvider(fallback));
+  const suggestions = await provider?.getSuggestions(["hello world"], 0, 11, {
+    signal: new AbortController().signal,
+  });
+
+  assert.deepEqual(suggestions, fallback);
+});
+
+test("/television uses the native select dialog and pastes the selected file", async () => {
+  const searcher: TelevisionSearcher = async ({ cwd, query, maxResults }) => {
+    assert.equal(cwd, "/tmp/project");
+    assert.equal(query, "src");
+    assert.equal(maxResults, 20);
+    return matches("src/index.ts", "src/extension.ts");
+  };
+  const fake = fakePi();
+  const ctx = fakeContext("/tmp/project");
+  ctx.nextSelectResult = "src/extension.ts";
+  createExtension({
+    searcher,
+    configLoader: async () => ({
+      mode: "native-live",
+      maxResults: 20,
+      refreshMs: 5000,
+    }),
+  }).register(fake.pi);
 
   await fake.commands
     .get("television")
     ?.handler("src", ctx as unknown as ExtensionCommandContext);
 
-  assert.deepEqual(ctx.pasted, ["@src/index.ts "]);
-  assert.deepEqual(ctx.statuses, ["television: picking file", undefined]);
+  assert.deepEqual(ctx.selectCalls, [
+    {
+      title: "television",
+      options: ["src/index.ts", "src/extension.ts"],
+    },
+  ]);
+  assert.deepEqual(ctx.pasted, ["@src/extension.ts "]);
+  assert.deepEqual(ctx.statuses, ["television: finding files", undefined]);
   assert.deepEqual(ctx.workingMessages, [
-    "television is picking a file",
+    "television is finding files",
     undefined,
   ]);
 });
 
-test("cancelled picks do not paste or notify errors", async () => {
-  const runner: TelevisionRunner = async (): Promise<TelevisionPickResult> => ({
-    status: "cancelled",
-  });
-  const fake = fakePi();
-  const ctx = fakeContext();
-  createExtension({ runner }).register(fake.pi);
-
-  await fake.commands
-    .get("television")
-    ?.handler("", ctx as unknown as ExtensionCommandContext);
-
-  assert.deepEqual(ctx.pasted, []);
-  assert.deepEqual(ctx.notifications, []);
-  assert.equal(ctx.statuses.at(-1), undefined);
-});
-
-test("failed picks notify without throwing or leaving stale async UI state", async () => {
-  const runner: TelevisionRunner = async () => ({
-    status: "failed",
-    message: "tv missing",
-  });
-  const fake = fakePi();
-  const ctx = fakeContext();
-  createExtension({ runner }).register(fake.pi);
-
-  await fake.commands
-    .get("television")
-    ?.handler("", ctx as unknown as ExtensionCommandContext);
-
-  assert.deepEqual(ctx.pasted, []);
-  assert.deepEqual(ctx.notifications, [
-    { message: "television failed: tv missing", type: "error" },
-  ]);
-  assert.equal(ctx.statuses.at(-1), undefined);
-  assert.equal(ctx.workingMessages.at(-1), undefined);
-});
-
-test("@ shortcut consumes one trigger, opens only one picker, and pastes after async selection", async () => {
-  let resolvePick: ((result: TelevisionPickResult) => void) | undefined;
-  let calls = 0;
-  const runner: TelevisionRunner = () =>
-    new Promise((resolve) => {
-      calls += 1;
-      resolvePick = resolve;
-    });
+test("select-dialog mode binds @ to the native select dialog instead of launching full-screen tv", async () => {
+  const searcher: TelevisionSearcher = async ({ query }) => {
+    assert.equal(query, undefined);
+    return matches("README.md", "src/index.ts");
+  };
   const fake = fakePi();
   const ctx = fakeContext("/tmp/project");
-  createExtension({ runner }).register(fake.pi);
-  fake.sessionStart?.(ctx);
+  ctx.nextSelectResult = "README.md";
+  createExtension({
+    searcher,
+    configLoader: async () => ({
+      mode: "select-dialog",
+      maxResults: 20,
+      refreshMs: 5000,
+    }),
+  }).register(fake.pi);
+
+  await fake.sessionStart?.(ctx);
 
   assert.deepEqual(ctx.invokeTerminal("@"), { consume: true });
-  assert.equal(ctx.invokeTerminal("@"), undefined);
-  assert.equal(calls, 1);
-
-  resolvePick?.({ status: "selected", path: "README.md" });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
+  assert.deepEqual(ctx.selectCalls, [
+    {
+      title: "television",
+      options: ["README.md", "src/index.ts"],
+    },
+  ]);
   assert.deepEqual(ctx.pasted, ["@README.md "]);
-  assert.deepEqual(ctx.invokeTerminal("@"), { consume: true });
-  assert.equal(calls, 2);
-});
-
-test("shortcut ignores @ in the middle of a token", () => {
-  const fake = fakePi();
-  const ctx = fakeContext();
-  createExtension({
-    runner: async () => ({ status: "selected", path: "README.md" }),
-  }).register(fake.pi);
-  fake.sessionStart?.(ctx);
-
-  assert.equal(ctx.invokeTerminal("a"), undefined);
-  assert.equal(ctx.invokeTerminal("@"), undefined);
-  assert.deepEqual(ctx.pasted, []);
+  assert.deepEqual(ctx.statuses, ["television: finding files", undefined]);
+  assert.deepEqual(ctx.workingMessages, [
+    "television is finding files",
+    undefined,
+  ]);
 });
 
 test("attachment paths are relative, quoted when needed, and safe for paths outside cwd", () => {
