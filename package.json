@@ -1,6 +1,6 @@
 {
   "name": "@ramarivera/pi-television",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Pi extension that replaces the fuzzy file finder with television (tv) for faster, non-blocking file search",
   "type": "module",
   "license": "MIT",
@@ -42,7 +42,8 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.14",
@@ -50,6 +51,7 @@
     "@earendil-works/pi-coding-agent": "*",
     "@types/node": "^24.0.0",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "@earendil-works/pi-tui": "*"
   }
 }
