@@ -49,11 +49,26 @@ Supported fields:
   "mode": "native-live",
   "includeFolders": true,
   "maxResults": 20,
-  "refreshMs": 10000
+  "refreshMs": 10000,
+  "gitTracked": true,
+  "gitRecencyDays": 14
 }
 ```
 
 `includeFolders` defaults to `true`, so folder paths are returned alongside files. Set it to `false` to restrict the picker to regular files only.
+
+`gitTracked` defaults to `true`. When the project is inside a git work tree, the searcher runs best-effort `git ls-files` and `git log --since=N` in the background to build ranking signals:
+
+- Tracked files rank above untracked ones (noise like generated/vendored files sinks to the bottom of the list).
+- Files edited within the last `gitRecencyDays` days (default `14`) get an additional boost.
+
+Git is fully optional: if git is missing or the directory is not a repo, ranking silently falls back to `fd`-only fuzzy matching. Set `"gitTracked": false` to disable the git probes entirely.
+
+## Ranking
+
+Results are ordered as exact path prefix, then basename prefix, then fuzzy match (pi-tui's `fuzzyMatch`, tokenized on whitespace and `/`). Within each bucket, ties are broken by git tier (tracked + recent > tracked > untracked), then path depth, then length, so the canonical file wins over vendored/test copies. Case-variant paths (e.g. `Foo.ts` / `foo.ts`) collapse to the best-ranked spelling.
+
+The native picker shows the **basename** as the item label and the **directory** as the description, so the first column stays readable instead of truncating long paths.
 
 ## Local Development
 

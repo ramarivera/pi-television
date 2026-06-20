@@ -7,6 +7,8 @@ export type {
   TelevisionExtensionOptions,
   TelevisionMode,
   TelevisionPickResult,
+  TelevisionRankOptions,
+  TelevisionRankSignals,
   TelevisionResolvedConfig,
   TelevisionSearcher,
   TelevisionSearchOptions,

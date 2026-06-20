@@ -18,6 +18,7 @@ import {
   createExtension,
   extensionInfo,
   loadTelevisionConfig,
+  rankTelevisionResults,
   type TelevisionSearcher,
   type TelevisionSearchResult,
   toEditorAttachmentPath,
@@ -250,6 +251,8 @@ test("native-live mode registers an autocomplete provider that returns @file sug
       maxResults: 20,
       refreshMs: 5000,
       includeFolders: true,
+      gitTracked: true,
+      gitRecencyDays: 14,
     }),
   }).register(fake.pi);
 
@@ -267,13 +270,13 @@ test("native-live mode registers an autocomplete provider that returns @file sug
     items: [
       {
         value: "@src/index.ts",
-        label: "src/index.ts",
-        description: "src/index.ts",
+        label: "index.ts",
+        description: "src",
       },
       {
         value: "@src/extension.ts",
-        label: "src/extension.ts",
-        description: "src/extension.ts",
+        label: "extension.ts",
+        description: "src",
       },
     ],
   });
@@ -291,6 +294,8 @@ test("autocomplete provider falls back to the current provider outside @file tok
       maxResults: 20,
       refreshMs: 5000,
       includeFolders: true,
+      gitTracked: true,
+      gitRecencyDays: 14,
     }),
   }).register(fake.pi);
 
@@ -325,6 +330,8 @@ test("/television uses the native select dialog and pastes the selected file", a
       maxResults: 20,
       refreshMs: 5000,
       includeFolders: true,
+      gitTracked: true,
+      gitRecencyDays: 14,
     }),
   }).register(fake.pi);
 
@@ -361,6 +368,8 @@ test("select-dialog mode binds @ to the native select dialog instead of launchin
       maxResults: 20,
       refreshMs: 5000,
       includeFolders: true,
+      gitTracked: true,
+      gitRecencyDays: 14,
     }),
   }).register(fake.pi);
 
@@ -409,7 +418,13 @@ type FakeExecPi = ExtensionAPI & {
   execOutput: { code: number; stdout: string; stderr: string };
 };
 
-function fakeExecPi(stdout: string): FakeExecPi {
+type FakeGit = {
+  tracked?: string;
+  prefix?: string;
+  log?: string;
+};
+
+function fakeExecPi(fdStdout: string, git?: FakeGit): FakeExecPi {
   const calls: FakeExecCall[] = [];
   const pi = {
     registerCommand() {},
@@ -420,12 +435,29 @@ function fakeExecPi(stdout: string): FakeExecPi {
       options: { cwd: string; timeout?: number; signal?: AbortSignal },
     ) {
       calls.push({ command, args, options });
-      return { code: 0, stdout, stderr: "" };
+      if (command === "git") {
+        // No git fixture provided → simulate "not inside a git repo" so the
+        // searcher skips git and falls back to fd-only ranking.
+        if (!git) {
+          return { code: 128, stdout: "", stderr: "not a git repository" };
+        }
+        if (args[0] === "ls-files") {
+          return { code: 0, stdout: git.tracked ?? "", stderr: "" };
+        }
+        if (args[0] === "rev-parse") {
+          return { code: 0, stdout: git.prefix ?? "", stderr: "" };
+        }
+        if (args[0] === "log") {
+          return { code: 0, stdout: git.log ?? "", stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return { code: 0, stdout: fdStdout, stderr: "" };
     },
   };
   return Object.assign(pi, {
     execCalls: calls,
-    execOutput: { code: 0, stdout, stderr: "" },
+    execOutput: { code: 0, stdout: fdStdout, stderr: "" },
   }) as unknown as FakeExecPi;
 }
 
@@ -434,16 +466,22 @@ test("default searcher includes folders by default (no --type f passed to fd)", 
   const searcher = createDefaultSearcher(pi);
   const results = await searcher({ cwd: "/tmp/project", query: "src" });
 
-  assert.equal(pi.execCalls.length, 1);
-  assert.deepEqual(pi.execCalls[0].command, "fd");
-  assert.deepEqual(pi.execCalls[0].args, [
+  // git is probed best-effort, but the fake cwd is not a git repo, so the
+  // searcher falls back to fd-only ranking.
+  const fdCall = pi.execCalls.find((call) => call.command === "fd");
+  assert.ok(fdCall, "expected an fd exec call");
+  assert.deepEqual(fdCall.args, [
     "--hidden",
     "--follow",
     "--exclude",
     ".git",
     "--strip-cwd-prefix",
   ]);
-  assert.equal(pi.execCalls[0].options.cwd, "/tmp/project");
+  assert.equal(fdCall.options.cwd, "/tmp/project");
+  assert.ok(
+    pi.execCalls.some((call) => call.command === "git"),
+    "expected a best-effort git probe before fd-only fallback",
+  );
   assert.deepEqual(
     results.map((result) => result.path),
     ["src", "src/index.ts"],
@@ -455,8 +493,9 @@ test("default searcher restricts to files when includeFolders is false", async (
   const searcher = createDefaultSearcher(pi);
   await searcher({ cwd: "/tmp/project", includeFolders: false });
 
-  assert.equal(pi.execCalls.length, 1);
-  assert.deepEqual(pi.execCalls[0].args, [
+  const fdCall = pi.execCalls.find((call) => call.command === "fd");
+  assert.ok(fdCall, "expected an fd exec call");
+  assert.deepEqual(fdCall.args, [
     "--type",
     "f",
     "--hidden",
@@ -465,6 +504,52 @@ test("default searcher restricts to files when includeFolders is false", async (
     ".git",
     "--strip-cwd-prefix",
   ]);
+});
+
+test("default searcher boosts git-tracked and recently-edited files", async () => {
+  const pi = fakeExecPi(
+    ["vendor/lib/index.ts", "src/index.ts", "index.ts"].join("\n"),
+    {
+      tracked: ["index.ts", "src/index.ts"].join("\n"),
+      prefix: "",
+      log: "index.ts\0",
+    },
+  );
+  const searcher = createDefaultSearcher(pi);
+  const results = await searcher({ cwd: "/tmp/project", query: "index" });
+
+  assert.deepEqual(
+    results.map((result) => result.path),
+    ["index.ts", "src/index.ts", "vendor/lib/index.ts"],
+  );
+});
+
+test("rankTelevisionResults tie-breaks fuzzy matches by tier, depth, then length", () => {
+  // Every basename fuzzy-matches "idx" with an identical score, so ordering
+  // is decided by the tie-break: equal tier → shallower path → shorter path.
+  const ranked = rankTelevisionResults(
+    ["b/c/index.ts", "d/index.ts", "a/index.ts"],
+    "idx",
+    20,
+  );
+
+  assert.deepEqual(
+    ranked.map((result) => result.path),
+    ["a/index.ts", "d/index.ts", "b/c/index.ts"],
+  );
+});
+
+test("rankTelevisionResults dedupes case-variant paths keeping the best-ranked", () => {
+  const ranked = rankTelevisionResults(
+    ["src/foo.ts", "src/Foo.ts"],
+    undefined,
+    20,
+  );
+
+  assert.deepEqual(
+    ranked.map((result) => result.path),
+    ["src/Foo.ts"],
+  );
 });
 
 test("loadTelevisionConfig defaults includeFolders to true when no config files exist", async () => {
@@ -499,6 +584,8 @@ test("native-live provider forwards the resolved includeFolders to the searcher"
       maxResults: 20,
       refreshMs: 5000,
       includeFolders: true,
+      gitTracked: true,
+      gitRecencyDays: 14,
     }),
   }).register(fake.pi);
 
